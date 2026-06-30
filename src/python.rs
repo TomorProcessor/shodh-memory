@@ -465,6 +465,11 @@ impl PyMemorySystem {
             media_refs: vec![],
             // Temporal extraction
             temporal_refs: vec![],
+            // NER + co-occurrence (populated by the handler pipeline; empty for
+            // the direct Python API). Base-build fix: the `python` feature lagged
+            // the Experience struct on the 0.1.81 commit.
+            ner_entities: vec![],
+            cooccurrence_pairs: vec![],
         };
 
         let memory_id = self
