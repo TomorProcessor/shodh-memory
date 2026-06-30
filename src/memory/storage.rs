@@ -1116,6 +1116,72 @@ impl MemoryStorage {
         Ok(())
     }
 
+    /// Persist access-metadata bumps for a batch of just-recalled memories in a
+    /// single pair of WriteBatches — the read-path-optimized alternative to a full
+    /// per-candidate re-index. Backport of upstream PR #297 onto the 0.1.81 base.
+    ///
+    /// On a recall, `Memory::update_access` only changes `last_accessed`,
+    /// `access_count`, and `importance`. Of the indexed fields, ONLY the
+    /// importance bucket (`(importance * 10.0) as u32`) can change — date, type,
+    /// entities, tags, episode, parent, etc. are immutable across an access. So a
+    /// full per-candidate re-index would be almost entirely redundant write
+    /// amplification on the hot recall path.
+    ///
+    /// This rewrites each main record once (in `self.db`) and touches the
+    /// importance index (in `self.index_db`) ONLY when a memory's bucket actually
+    /// crossed, coalescing everything into two batched writes. `items` is
+    /// `(memory, importance_before_the_access)`.
+    ///
+    /// NOTE: unlike the upstream (post-CF) version which uses a single
+    /// column-family-aware batch, the 0.1.81 base keeps secondary indices in a
+    /// separate `index_db`, so the importance-bucket move is a second batch.
+    pub fn persist_access_updates(&self, items: &[(&Memory, f32)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+
+        // 1) Main records (carry the new access_count / last_accessed / importance).
+        //    Same encoding as `store`.
+        let mut main_batch = WriteBatch::default();
+        for (memory, _) in items {
+            let value = bincode::serde::encode_to_vec(*memory, bincode::config::standard())
+                .context(format!(
+                    "serialize memory {} for access update",
+                    memory.id.0
+                ))?;
+            main_batch.put(memory.id.0.as_bytes(), value);
+        }
+        self.db
+            .write_opt(main_batch, &write_opts)
+            .context("persist_access_updates main batch write")?;
+
+        // 2) Importance index: rewrite only when the coarse bucket changed.
+        //    Lives in the separate secondary-index DB on the 0.1.81 base.
+        let mut index_batch = WriteBatch::default();
+        let mut index_dirty = false;
+        for (memory, importance_before) in items {
+            let old_bucket = (*importance_before * 10.0) as u32;
+            let new_bucket = (memory.importance() * 10.0) as u32;
+            if old_bucket != new_bucket {
+                let old_key = format!("importance:{}:{}", old_bucket, memory.id.0);
+                let new_key = format!("importance:{}:{}", new_bucket, memory.id.0);
+                index_batch.delete(old_key.as_bytes());
+                index_batch.put(new_key.as_bytes(), b"1");
+                index_dirty = true;
+            }
+        }
+        if index_dirty {
+            self.index_db
+                .write_opt(index_batch, &write_opts)
+                .context("persist_access_updates index batch write")?;
+        }
+
+        Ok(())
+    }
+
     /// Update secondary indices for efficient retrieval
     fn update_indices(&self, memory: &Memory) -> Result<()> {
         let mut batch = WriteBatch::default();
@@ -3210,6 +3276,77 @@ impl MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persist_access_updates_persists_record_and_moves_importance_bucket() {
+        // Backport of PR #297 (adapted to the 0.1.81 dual-DB layout) — verifies the
+        // read-path batched access-update: the main record is rewritten in `db`
+        // and the importance index in `index_db` is moved ONLY when the bucket
+        // changed (date/type/etc. indices are untouched because they don't change
+        // on access).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path()).expect("storage");
+
+        let id = MemoryId(
+            uuid::Uuid::parse_str("a1a1a1a1-0000-4000-8000-000000000001").expect("static uuid"),
+        );
+        let experience = Experience {
+            experience_type: ExperienceType::Observation,
+            content: "access-update batching test".to_string(),
+            ..Default::default()
+        };
+        let memory = Memory::new(id.clone(), experience, 0.55, None, None, None, None); // bucket 5
+        storage.store(&memory).expect("store");
+
+        let key5 = format!("importance:5:{}", id.0);
+        let key6 = format!("importance:6:{}", id.0);
+        assert!(
+            storage.index_db.get(key5.as_bytes()).unwrap().is_some(),
+            "bucket 5 indexed after store"
+        );
+
+        // Access bumps importance across the bucket boundary.
+        let before = memory.importance(); // 0.55
+        memory.set_importance(0.65); // bucket 6
+        storage
+            .persist_access_updates(&[(&memory, before)])
+            .expect("persist");
+
+        // Main record carries the new importance.
+        let reread = storage.get(&id).expect("get");
+        assert!(
+            (reread.importance() - 0.65).abs() < 1e-6,
+            "new importance must be persisted, got {}",
+            reread.importance()
+        );
+        // Importance index moved 5 -> 6.
+        assert!(
+            storage.index_db.get(key6.as_bytes()).unwrap().is_some(),
+            "bucket 6 present after update"
+        );
+        assert!(
+            storage.index_db.get(key5.as_bytes()).unwrap().is_none(),
+            "stale bucket 5 removed"
+        );
+
+        // Empty input is a no-op.
+        storage.persist_access_updates(&[]).expect("empty no-op");
+
+        // Same-bucket bump persists the record but leaves the index untouched.
+        let before2 = memory.importance(); // 0.65
+        memory.set_importance(0.68); // still bucket 6
+        storage
+            .persist_access_updates(&[(&memory, before2)])
+            .expect("persist same bucket");
+        assert!(
+            storage.index_db.get(key6.as_bytes()).unwrap().is_some(),
+            "bucket 6 still present after same-bucket update"
+        );
+        assert!(
+            (storage.get(&id).unwrap().importance() - 0.68).abs() < 1e-6,
+            "importance still persisted on a same-bucket update"
+        );
+    }
 
     #[test]
     fn test_write_mode_default_async() {

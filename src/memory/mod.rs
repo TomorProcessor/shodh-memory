@@ -1314,9 +1314,17 @@ impl MemorySystem {
             .read()
             .log_retrieved("", memories.len(), &sources);
 
-        // Update access counts with instrumentation for consolidation events
+        // Update access counts (in-memory) + record consolidation events, then
+        // persist all candidates' access bumps in ONE batched write instead of a
+        // full re-index per candidate (backport of PR #297).
+        let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
         for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            let before =
+                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            access_refs.push((memory.as_ref(), before));
+        }
+        if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+            tracing::warn!("Failed to persist access updates: {e}");
         }
 
         // Hebbian learning: co-activation strengthens associations between memories
@@ -2417,9 +2425,17 @@ impl MemorySystem {
         }
 
         // Update access counts with instrumentation for consolidation events
-        // (only for memories that survived competition)
+        // (only for memories that survived competition). Bump in-memory + record
+        // events, then persist all candidates' access updates in ONE batched write
+        // rather than a full re-index per candidate (backport of PR #297).
+        let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
         for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            let before =
+                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            access_refs.push((memory.as_ref(), before));
+        }
+        if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+            tracing::warn!("Failed to persist access updates: {e}");
         }
 
         // PIPE-10: Hebbian learning AFTER competition - only coactivate winners
@@ -3629,15 +3645,25 @@ impl MemorySystem {
             .map_err(|e| anyhow::anyhow!("Failed to update long-term memory access: {e}"))
     }
 
-    /// Update access count with instrumentation for consolidation events
+    /// Update access count with instrumentation for consolidation events.
     ///
     /// Records MemoryStrengthened events when memories are accessed during retrieval,
     /// capturing activation changes for introspection.
-    fn update_access_count_instrumented(&self, memory: &SharedMemory, reason: StrengtheningReason) {
+    ///
+    /// Bumps the recalled memory's access metadata IN-MEMORY only and returns the
+    /// memory's importance BEFORE the access. Persistence is intentionally NOT done
+    /// here: callers batch-persist all recalled candidates in one WriteBatch via
+    /// `persist_access_updates` (the importance index needs the old bucket, hence
+    /// the returned value). Backport of upstream PR #297 onto the 0.1.81 base.
+    fn update_access_count_instrumented(
+        &self,
+        memory: &SharedMemory,
+        reason: StrengtheningReason,
+    ) -> f32 {
         // Capture activation before update
         let activation_before = memory.importance();
 
-        // Perform the actual access update
+        // Perform the actual access update (in-memory; persisted in batch by caller)
         memory.update_access();
 
         // Capture activation after update
@@ -3663,6 +3689,8 @@ impl MemorySystem {
 
             self.consolidation_events.write().push(event);
         }
+
+        activation_before
     }
 
     /// Clean up graph episodes for a batch of deleted memory IDs (best-effort)
