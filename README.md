@@ -24,6 +24,21 @@
 
 ---
 
+## About This Fork
+
+This is a fork of [varun29ankuS/shodh-memory](https://github.com/varun29ankuS/shodh-memory), pinned to the **v0.1.81** base (upstream commit `e840c5c`). It deliberately stays **below** the upstream RocksDB column-family migration (`997955d`) and on the same bincode serialization format, so existing legacy stores open without any data migration.
+
+What's different from upstream v0.1.81:
+
+- **Access-count persistence backport** (upstream PR #297): `recall` previously bumped `access_count` / `last_accessed` / `importance` in memory only and never wrote them to disk, so `list` and any fresh process always read 0. The read path now batch-persists these updates, adapted to the 0.1.81 dual-DB layout (main records plus the separate importance-bucket index).
+- **Python wheel build fix**: `src/python.rs` was missing the `ner_entities` and `cooccurrence_pairs` fields on `Experience`, which broke the `python` feature (PyO3) build on the 0.1.81 base.
+- **Pinned `ort` to `=2.0.0-rc.11`**: rc.12 fails to compile under `load-dynamic`.
+- **Vendored prebuilt wheel**: `dist/shodh_memory-0.1.81-cp38-abi3-macosx_11_0_x86_64.whl` (macOS x86_64, abi3) built from this branch, so a rebuild-free reinstall travels with the repo. It uses `ort` load-dynamic and needs `libonnxruntime.dylib` at runtime (via bundling or `ORT_DYLIB_PATH`).
+
+Everything below this section is the upstream README as of v0.1.81.
+
+---
+
 We built this because AI agents forget everything between sessions. They make the same mistakes, ask the same questions, lose context constantly.
 
 Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, activation decay, semantic consolidation—packed into a single ~17MB binary that runs offline. Deploy on cloud, edge devices, or air-gapped systems.
