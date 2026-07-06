@@ -1,0 +1,97 @@
+name: Windows Wheel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-wheels:
+    name: Build Windows wheels
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Download models and ONNX Runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundled/lib
+          New-Item -ItemType Directory -Force -Path bundled/models/minilm-l6
+          New-Item -ItemType Directory -Force -Path bundled/models/bert-tiny-ner
+          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx" -OutFile "bundled/models/minilm-l6/model_quantized.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "bundled/models/minilm-l6/tokenizer.json"
+          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx" -OutFile "bundled/models/bert-tiny-ner/model.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json" -OutFile "bundled/models/bert-tiny-ner/tokenizer.json"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip" -OutFile "onnxruntime.zip"
+          Expand-Archive -Path "onnxruntime.zip" -DestinationPath "."
+          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
+          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime_providers_shared.dll" -Destination "bundled/lib/onnxruntime_providers_shared.dll"
+          Write-Host "=== Downloaded files ==="
+          Get-ChildItem -Path bundled -Recurse | Select-Object FullName, Length
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build ABI3 wheels (Python 3.8+)
+        run: maturin build --release --target x86_64-pc-windows-msvc --out dist --features python -v
+
+      - name: Inject bundled files into wheel
+        shell: pwsh
+        run: |
+          cd dist
+          $wheel = Get-ChildItem *win_amd64*.whl | Select-Object -First 1
+          Write-Host "Processing wheel: $($wheel.Name)"
+
+          # Unzip wheel
+          Expand-Archive -Path $wheel.FullName -DestinationPath wheel_contents -Force
+
+          # Copy bundled files into shodh_memory package
+          Copy-Item -Recurse ../bundled/lib wheel_contents/shodh_memory/
+          Copy-Item -Recurse ../bundled/models wheel_contents/shodh_memory/
+
+          # Update RECORD file with new files
+          cd wheel_contents
+          $recordFile = Get-ChildItem -Path "shodh_memory-*.dist-info/RECORD" | Select-Object -First 1
+
+          # Add new files to RECORD
+          $files = Get-ChildItem -Path "shodh_memory/lib/*", "shodh_memory/models/*/*" -File
+          foreach ($file in $files) {
+            $relativePath = $file.FullName.Replace("$PWD\", "").Replace("\", "/")
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
+            $size = $file.Length
+            Add-Content -Path $recordFile.FullName -Value "$relativePath,sha256=$hash,$size"
+          }
+
+          # Repack wheel
+          Remove-Item "../$($wheel.Name)"
+          Compress-Archive -Path * -DestinationPath "../$($wheel.Name)" -Force
+          cd ..
+          Remove-Item -Recurse -Force wheel_contents
+
+          Write-Host "=== Final wheel size ==="
+          Get-ChildItem *win_amd64*.whl | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB,2)}}
+
+      - name: Inspect wheel
+        shell: pwsh
+        run: |
+          Write-Host "=== Wheel file size ==="
+          Get-ChildItem dist/*win_amd64*.whl | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB,2)}}
+          Write-Host "=== Wheel contents ==="
+          $wheel = Get-ChildItem dist/*win_amd64*.whl | Select-Object -First 1
+          Expand-Archive -Path $wheel.FullName -DestinationPath wheel_inspect -Force
+          Get-ChildItem wheel_inspect -Recurse | Select-Object FullName
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows
+          path: dist/*win_amd64*.whl
