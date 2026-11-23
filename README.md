@@ -34,7 +34,7 @@ What's different from upstream v0.1.81:
 - **No lossy compression in the Python library**: upstream replaces a memory older than 7 days with its first 50 words unless its importance is above 0.8 or it was recalled more than 10 times, and the original text is not recoverable. The Python binding now opens the store with `MemoryConfig::without_compression`, so memories keep their full text. Memories already summarised stay as they are. The server binary is unchanged.
 - **Python wheel build fix**: `src/python.rs` was missing the `ner_entities` and `cooccurrence_pairs` fields on `Experience`, which broke the `python` feature (PyO3) build on the 0.1.81 base.
 - **Pinned `ort` to `=2.0.0-rc.11`**: rc.12 fails to compile under `load-dynamic`.
-- **Vendored prebuilt wheel**: `dist/shodh_memory-0.1.81-cp38-abi3-macosx_11_0_x86_64.whl` (macOS x86_64, abi3) built from this branch, so a rebuild-free reinstall travels with the repo. It uses `ort` load-dynamic and needs `libonnxruntime.dylib` at runtime (via bundling or `ORT_DYLIB_PATH`).
+- **Vendored prebuilt wheels**: `dist/` holds the abi3 wheels built from this branch by `.github/workflows/windows-wheel.yml`, so a rebuild-free reinstall travels with the repo: `dist/shodh_memory-0.1.81-cp38-abi3-macosx_10_13_x86_64.whl` (macOS x86_64), `dist/shodh_memory-0.1.81-cp38-abi3-macosx_11_0_arm64.whl` (macOS arm64) and `dist/shodh_memory-0.1.81-cp38-abi3-win_amd64.whl` (Windows x64). Each bundles the ONNX Runtime 1.23.2 library under `shodh_memory/lib/` and the two ONNX models under `shodh_memory/models/`.
 
 Everything below this section is the upstream README as of v0.1.81.
 
