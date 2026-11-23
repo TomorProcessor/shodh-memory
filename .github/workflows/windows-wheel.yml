@@ -1,10 +1,18 @@
-name: Windows Wheel
+name: Wheels (Windows, macOS)
 
+# The file keeps its name: it is the only workflow GitHub has registered for this
+# fork, and a manual run can only start a workflow that exists on the default branch.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  # ONNX Runtime 1.23.2 from NuGet. The GitHub release assets the upstream workflows
+  # download are gone (github.com/microsoft/onnxruntime answers 404); the NuGet
+  # package carries the same libraries under runtimes/<platform>/native/.
+  ONNXRUNTIME_NUPKG: https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime/1.23.2
 
 jobs:
   build-windows-wheels:
@@ -31,10 +39,10 @@ jobs:
           Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "bundled/models/minilm-l6/tokenizer.json"
           Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx" -OutFile "bundled/models/bert-tiny-ner/model.onnx"
           Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json" -OutFile "bundled/models/bert-tiny-ner/tokenizer.json"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip" -OutFile "onnxruntime.zip"
-          Expand-Archive -Path "onnxruntime.zip" -DestinationPath "."
-          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
-          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime_providers_shared.dll" -Destination "bundled/lib/onnxruntime_providers_shared.dll"
+          Invoke-WebRequest -Uri "$env:ONNXRUNTIME_NUPKG" -OutFile "onnxruntime.zip"
+          Expand-Archive -Path "onnxruntime.zip" -DestinationPath "onnxruntime-nupkg"
+          Copy-Item "onnxruntime-nupkg/runtimes/win-x64/native/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
+          Copy-Item "onnxruntime-nupkg/runtimes/win-x64/native/onnxruntime_providers_shared.dll" -Destination "bundled/lib/onnxruntime_providers_shared.dll"
           Write-Host "=== Downloaded files ==="
           Get-ChildItem -Path bundled -Recurse | Select-Object FullName, Length
 
@@ -95,3 +103,103 @@ jobs:
         with:
           name: wheels-windows
           path: dist/*win_amd64*.whl
+
+  build-macos-wheels:
+    name: Build macOS ${{ matrix.arch }} wheels
+    runs-on: macos-latest  # ARM runner; x64 is cross-compiled
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-apple-darwin
+            runtime: osx-x64
+            deployment-target: "10.13"
+          - arch: arm
+            target: aarch64-apple-darwin
+            runtime: osx-arm64
+            deployment-target: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install LLVM (for RocksDB)
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
+      - name: Download models and ONNX Runtime
+        run: |
+          mkdir -p bundled/lib bundled/models/minilm-l6 bundled/models/bert-tiny-ner
+          curl -L --fail -o bundled/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
+          curl -L --fail -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+          curl -L --fail -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
+          curl -L --fail -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
+          curl -L --fail -o onnxruntime.nupkg "$ONNXRUNTIME_NUPKG"
+          unzip -q -j onnxruntime.nupkg "runtimes/${{ matrix.runtime }}/native/libonnxruntime.dylib" -d bundled/lib
+          echo "=== Downloaded files ==="
+          ls -la bundled/lib/ bundled/models/minilm-l6/ bundled/models/bert-tiny-ner/
+          du -sh bundled/
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build ABI3 wheels (Python 3.8+)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}
+        run: maturin build --release --target ${{ matrix.target }} --out dist --features python -v
+
+      - name: Inject bundled files into wheel
+        run: |
+          cd dist
+          wheel_file=$(ls *.whl | head -1)
+          echo "Processing wheel: $wheel_file"
+
+          # Unzip wheel
+          unzip -q "$wheel_file" -d wheel_contents
+
+          # Copy bundled files into shodh_memory package
+          cp -r ../bundled/lib wheel_contents/shodh_memory/
+          cp -r ../bundled/models wheel_contents/shodh_memory/
+
+          # Update RECORD file with new files
+          cd wheel_contents
+          record_file=$(ls shodh_memory-*.dist-info/RECORD)
+
+          # Add new files to RECORD (with proper SHA256 hashes)
+          for file in shodh_memory/lib/* shodh_memory/models/*/* ; do
+            if [ -f "$file" ]; then
+              hash=$(shasum -a 256 "$file" | cut -d' ' -f1)
+              size=$(stat -f%z "$file")
+              echo "$file,sha256=$hash,$size" >> "$record_file"
+            fi
+          done
+
+          # Repack wheel
+          rm "../$wheel_file"
+          zip -rq "../$wheel_file" .
+          cd ..
+          rm -rf wheel_contents
+
+          echo "=== Final wheel size ==="
+          ls -lh *.whl
+
+      - name: Inspect wheel
+        run: |
+          echo "=== Wheel file size ==="
+          ls -lh dist/*.whl
+          echo "=== Wheel contents ==="
+          unzip -l dist/*.whl
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.arch }}
+          path: dist/*.whl
