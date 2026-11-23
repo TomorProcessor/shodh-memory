@@ -31,6 +31,7 @@ This is a fork of [varun29ankuS/shodh-memory](https://github.com/varun29ankuS/sh
 What's different from upstream v0.1.81:
 
 - **Access-count persistence backport** (upstream PR #297): `recall` previously bumped `access_count` / `last_accessed` / `importance` in memory only and never wrote them to disk, so `list` and any fresh process always read 0. The read path now batch-persists these updates, adapted to the 0.1.81 dual-DB layout (main records plus the separate importance-bucket index).
+- **No lossy compression in the Python library**: upstream replaces a memory older than 7 days with its first 50 words unless its importance is above 0.8 or it was recalled more than 10 times, and the original text is not recoverable. The Python binding now opens the store with `MemoryConfig::without_compression`, so memories keep their full text. Memories already summarised stay as they are. The server binary is unchanged.
 - **Python wheel build fix**: `src/python.rs` was missing the `ner_entities` and `cooccurrence_pairs` fields on `Experience`, which broke the `python` feature (PyO3) build on the 0.1.81 base.
 - **Pinned `ort` to `=2.0.0-rc.11`**: rc.12 fails to compile under `load-dynamic`.
 - **Vendored prebuilt wheel**: `dist/shodh_memory-0.1.81-cp38-abi3-macosx_11_0_x86_64.whl` (macOS x86_64, abi3) built from this branch, so a rebuild-free reinstall travels with the repo. It uses `ort` load-dynamic and needs `libonnxruntime.dylib` at runtime (via bundling or `ORT_DYLIB_PATH`).

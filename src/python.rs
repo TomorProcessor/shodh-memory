@@ -316,10 +316,9 @@ impl PyMemorySystem {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./shodh_data"));
 
-        let config = MemoryConfig {
-            storage_path: path,
-            ..Default::default()
-        };
+        // The Python library runs as an embedded store that is the only copy of
+        // its memories, so old ones must keep their full text.
+        let config = MemoryConfig::without_compression(path);
 
         let inner = MemorySystem::new(config).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create memory system: {}", e))
