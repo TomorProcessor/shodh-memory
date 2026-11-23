@@ -4,6 +4,15 @@ name: Wheels (Windows, macOS)
 # fork, and a manual run can only start a workflow that exists on the default branch.
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Which wheels to build'
+        type: choice
+        options:
+          - all
+          - windows
+          - macos
+        default: all
 
 permissions:
   contents: read
@@ -17,6 +26,7 @@ env:
 jobs:
   build-windows-wheels:
     name: Build Windows wheels
+    if: ${{ inputs.platforms != 'macos' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +116,7 @@ jobs:
 
   build-macos-wheels:
     name: Build macOS ${{ matrix.arch }} wheels
+    if: ${{ inputs.platforms != 'windows' }}
     runs-on: macos-latest  # ARM runner; x64 is cross-compiled
     strategy:
       fail-fast: false
@@ -154,11 +165,13 @@ jobs:
       - name: Build ABI3 wheels (Python 3.8+)
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}
-        run: maturin build --release --target ${{ matrix.target }} --out dist --features python -v
+        # Not dist/: the fork keeps prebuilt wheels there, and the steps below must
+        # work on the wheel built here, not on whichever sorts first.
+        run: maturin build --release --target ${{ matrix.target }} --out wheelhouse --features python -v
 
       - name: Inject bundled files into wheel
         run: |
-          cd dist
+          cd wheelhouse
           wheel_file=$(ls *.whl | head -1)
           echo "Processing wheel: $wheel_file"
 
@@ -194,12 +207,12 @@ jobs:
       - name: Inspect wheel
         run: |
           echo "=== Wheel file size ==="
-          ls -lh dist/*.whl
+          ls -lh wheelhouse/*.whl
           echo "=== Wheel contents ==="
-          unzip -l dist/*.whl
+          unzip -l wheelhouse/*.whl
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.arch }}
-          path: dist/*.whl
+          path: wheelhouse/*.whl
