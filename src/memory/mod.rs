@@ -151,6 +151,31 @@ impl Default for MemoryConfig {
     }
 }
 
+/// `compression_age_days` that no memory reaches (100 years).
+///
+/// Not `u32::MAX`: the age is subtracted from the current time, and a date that
+/// far back is outside chrono's range.
+pub const NO_COMPRESSION_AGE_DAYS: u32 = 36_500;
+
+impl MemoryConfig {
+    /// Config for a store that holds the only copy of its memories: nothing is
+    /// ever rewritten into a summary.
+    ///
+    /// With the defaults, a memory older than `compression_age_days` keeps only
+    /// its first 50 words unless it is important or recalled often, and the rest
+    /// is not recoverable. Switching `auto_compress` off is not enough on its
+    /// own: promotion to long-term compresses by age without checking it, so the
+    /// age is moved out of reach as well.
+    pub fn without_compression(storage_path: PathBuf) -> Self {
+        Self {
+            storage_path,
+            auto_compress: false,
+            compression_age_days: NO_COMPRESSION_AGE_DAYS,
+            ..Default::default()
+        }
+    }
+}
+
 /// Main memory system
 pub struct MemorySystem {
     config: MemoryConfig,
